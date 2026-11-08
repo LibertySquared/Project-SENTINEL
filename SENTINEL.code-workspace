@@ -1,0 +1,10 @@
+{
+  "folders": [{"path":"."}],
+  "tasks": {
+    "version":"2.0.0",
+    "tasks":[
+      {"label":"SENTINEL: acceptance tests","type":"process","command":"node","args":["--test","test/sentinel.test.mjs"],"problemMatcher":[]},
+      {"label":"SENTINEL: safe disposable demo","type":"process","command":"node","args":["demo.mjs"],"problemMatcher":[]}
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+# Reference implementations and dependency audit
+
+Inspected November 8, 2026. Original implementation written for this prototype; **no upstream source code, prompts, assets or dependencies copied or vendored**. Accordingly no upstream notice has been removed or needs attaching to copied code. Any later reuse must retain the complete corresponding MIT copyright and permission notice.
+
+* Juror: https://github.com/Juror-AI/juror — reference for separately prompted model reviews and evidence verification. MIT, copyright 2026 Juror contributors: https://github.com/Juror-AI/juror/blob/main/LICENSE
+* Code Jury: https://github.com/agentsdance/codejury — reference for judge/reproduce/repair/re-review cycle and local persisted findings. MIT, copyright 2026 zzxwill: https://github.com/agentsdance/codejury/blob/master/LICENSE
+* PR-Agent: https://github.com/The-PR-Agent/pr-agent — reference for configurable structured reviews and local Ollama integration. MIT, copyright 2026 The PR Agent: https://github.com/The-PR-Agent/pr-agent/blob/main/LICENSE
+
+Audit boundary: SENTINEL has zero npm production or development dependencies. All imports are Node standard library or local files; no upstream dependency graph is incorporated. Node runtime is separately installed and distributed under its own license and third-party notices; Git and Ollama are external executables/services, not bundled dependencies. Git is GPLv2; Ollama engine is MIT. Model weights have separate terms, which are not covered by the engine license: this prototype uses existing local installations and redistributes no weights. No claim of a complete audit of installed runtime transitive components or model distribution rights. Re-audit before packaging or redistribution. `package.json` is private and UNLICENSED pending the owner's licensing decision.

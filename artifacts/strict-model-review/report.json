@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "independence": {
+    "provider": "Ollama (single local provider)",
+    "configuredModels": [
+      "qwen2.5-coder:7b",
+      "qwen3:4b"
+    ],
+    "independentReviewers": false,
+    "note": "Different configured models; shared provider, correlated errors possible. Independence not established."
+  },
+  "snapshot": {
+    "root": "D:\\Project SENTINEL\\artifacts\\validation\\planted-repo",
+    "head": "783d1dd57fd3288c3dc5b47bd2609268cd7e0117",
+    "status": "",
+    "excluded": [],
+    "bytes": 457,
+    "digest": "280058c146da5f7d671c51ca224d74f08f95ea393985aa691bbe37adcc206f3c",
+    "coverage": "Tracked eligible text only; untracked, ignored, binary and oversized files excluded."
+  },
+  "reports": [
+    {
+      "role": "correctness",
+      "status": "error",
+      "error": "Evidence does not match cited line"
+    },
+    {
+      "role": "requirements",
+      "status": "error",
+      "error": "Evidence does not match cited line"
+    }
+  ],
+  "findings": [],
+  "targetUnchanged": true,
+  "gate": "NEEDS_HUMAN_REVIEW",
+  "note": "No automated approval. Static support is not runtime reproduction; excluded coverage and model errors remain visible."
+}

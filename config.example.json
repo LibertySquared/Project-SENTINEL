@@ -1,0 +1,10 @@
+{
+  "endpoint": "http://127.0.0.1:11434",
+  "maxRounds": 2,
+  "maxBytes": 24000,
+  "reviewers": [
+    {"role":"correctness","model":"qwen2.5-coder:7b","instructions":"Find concrete runtime and boundary defects."},
+    {"role":"requirements","model":"qwen3:4b","instructions":"Find missing requirements and validation omissions."}
+  ],
+  "judge": {"role":"adversarial judge","model":"gemma4:e2b","instructions":"Challenge each finding. Reject speculation and explain a minimal reproduction. Do not approve without evidence."}
+}
