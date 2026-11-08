@@ -1,37 +1,50 @@
-# PROJECT SENTINEL — local prototype
+# PROJECT SENTINEL — Stage 3 isolated implementation
 
-Requires Windows, Node.js 22+ and Git on PATH. No npm install, subscriptions, cloud API keys, or third-party packages. Confirmed installation: `D:\Project SENTINEL`.
+This is the unmerged implementation branch `sentinel/milestone-2-stage-3`. The original `D:\Project SENTINEL` source is untouched. The approved plan and historical artifacts remain immutable. This is limited review infrastructure, not an autonomous approval authority.
+
+Requires existing Node.js 22+ and Git. Uses only standard libraries: no installation, paid API, package or model download.
 
 ```powershell
-Set-Location 'D:\Project SENTINEL'
+Set-Location 'D:\Project SENTINEL\artifacts\milestone-2-stage-3\implementation'
+$env:TEMP='D:\Project SENTINEL\artifacts\milestone-2-stage-3\runtime-temp'
+$env:TMP=$env:TEMP
 node --test test/*.test.mjs
-node demo.mjs
-# Local AI review plus deliberately broken fixture and bounded repairs:
-node demo.mjs artifacts\my-validation --live
-# Review your selected Git ROOT; output must be a NEW folder outside that repository:
-node cli.mjs 'D:\YourRepo' config.example.json 'D:\Project SENTINEL\artifacts\review-001'
+node demo.mjs ..\my-disposable-demo
+node cli.mjs --evaluate-archive ..\my-archived-evaluation
 ```
 
-Ollama must already be running on 127.0.0.1:11434. The example uses installed qwen2.5-coder:7b and qwen3:4b reviewers plus gemma4:e2b judge. Adjust model names and role instructions independently in your own configuration. Calls run sequentially, 180 seconds per request, 30 findings per role maximum, 8k context and 1600 output tokens. Models unload after each request. `maxBytes` caps source input; `maxRounds` controls the demo repair budget, bounded to 1–3 (default two). There is no automatic model download. Structured output uses Ollama's JSON schema format: https://docs.ollama.com/capabilities/structured-outputs
+Use new output directories for each run. The temp settings let this restricted Windows environment create disposable Git repositories; ordinary deployments can use their existing temp directory.
 
-## What works
+## Evidence and adjudication
 
-The review CLI reads eligible tracked text from the current working tree, including tracked local edits, without running repository code. It records HEAD, status, source digest, coverage exclusions, independently prompted role reports, raw structured responses, exact line/quote checks, adversarial judge challenges, and a hash-chained JSONL ledger. Invalid citations are retained as rejected evidence while valid findings continue to the judge; the report is marked partial. Errors and malformed evidence fail closed. The gate always remains NEEDS_HUMAN_REVIEW. A model saying “supported” is never recorded as runtime reproduction. Exit code 0 means the review ran without reviewer errors, not approval; 1 means failed/partial execution; 2 means missing arguments.
+Findings retain original allegations, atomic scope/condition, source evidence, mechanisms and remedies independently. Trusted requirements and correctly bound evidence determine supported/rejected outcomes; AI disagreement cannot demote them. Original AI verdicts/rationales and disagreements remain auditable. Ambiguous scope or conflicting requirements stays uncertain. Failed necessary binding is unverified/incomplete. Explanation correctness never automatically changes proven behavioral correctness.
 
-The demo plants two defects in a fresh disposable Git repository: incorrect mean divisor and omitted empty-input validation. The judge's executable evidence is a fixed, known test harness: tests fail initially, one defect remains after round one, all three regression tests pass after round two. Repair uses exact preconditioned edits from a deterministic plan, not autonomous AI patches. Re-review in the bounded loop combines repeated behavioral tests with explicit requirement checks. Repair evidence includes every round, test output, candidate diff and source-unchanged check. The defective source stays unchanged.
+Existing partial-finding extraction remains in place. Invalid sibling citations do not discard valid allegations. A matching quote establishes lexical fidelity, not semantic relevance. Reports separately record reviewer/judge execution, adjudication, reproduction, coverage, quality acceptance and pending human approval. Judge failure reaches CLI failure without erasing trusted behavioral evidence. Exit zero is execution success, never project approval.
 
-`repairLoop(root, plan, rounds, verify)` is a library API for trusted callers. It refuses dirty source trees, clones locally without hardlinks, creates a detached disposable worktree in that clone, and deletes only its own temporary directory. Source repository worktree metadata is never altered. A trusted caller must explicitly supply the repair plan and verification function; there is no CLI that executes arbitrary repository tests or accepts model-produced commands.
+## Trusted fixture adapter
 
-## Safety and practical limits
+Only the exact original mean fixture and its two approved repair versions can execute. Test and requirement bytes are checked too. A fresh VM evaluates the real approved function with fixed oracle cases, no imports, host callbacks, process, require or network APIs. Unknown code or edited test bytes are blocked before execution. **The VM is not a sandbox for hostile code; the exact-byte allowlist is mandatory.** Generic repository execution and model commands are disabled.
 
-No push, merge, reset, target edit, or target test execution exists in the review CLI. No automatic apply-to-source feature exists. Writing repairs into a real target requires a future explicit human approval workflow; this prototype cannot do it. Only the known generated fixture runs executable tests automatically. A disposable worktree isolates Git changes, **not hostile code execution**: never supply untrusted verification callbacks. Do not run tests from an unknown repository without reviewing them and giving approval.
+Actual baseline outputs are 2 instead of 3, a missing RangeError, and 3.5 instead of 7. Each result binds to source/candidate/harness/test/finding identities. Divisor facts for explanation assessment are explicitly source-derived from the exact approved formula, not separate runtime probes. Process-local trust receipts cannot be issued by deserialized/model JSON. They are not signatures or independent attestation; approved host code is part of the trusted computing base.
 
-Tracked files only; common source/text extensions only; no full repository or dependency audit. Untracked and ignored files are excluded; tracked deletions are listed as excluded. Links are rejected. There is no secret scanner: eligible tracked source may contain secrets, although requests are restricted to local Ollama. Coverage caps can omit important files and are visible in reports. Snapshots can race concurrent editing: avoid changing the target while reviewing. The digest/status comparison covers selected content and Git status, not a forensic byte-level guarantee for excluded files.
+Repairs use a local Git bundle, separate clone and detached worktree, avoiding shell/network transport. Each round records candidate identity and explicit edits. Only the marked owned temp workspace is cleaned up. No repair is accepted into an original repository and no push/apply path exists.
 
-Different models share one local inference provider. This is model diversity, not proven reviewer independence. Same-model configurations explicitly disclose their limitation. Model names are configured identities, not cryptographic proof of different weights. Small local models may miss defects or return malformed JSON. Empty results never earn automatic approval. The evidence hash chain detects edits only if its final hash is trusted elsewhere; it is not a signed or tamper-proof audit log.
+## Provenance and evaluation
 
-## Files
+Fresh manifests/ledgers capture implementation/config/profile/source identities, exact safe requests, bounded responses/metadata, rejected outputs, budgets and candidate evidence. Redacted/truncated capture explicitly denies exact replay. Old missing data remains unknown; historical artifacts are never rewritten. Ledger chains are unsigned local integrity records.
 
-`sentinel.mjs` engine; `cli.mjs` read-only entry point; `demo.mjs` disposable fixture, trusted judge tests and repair demonstration; `test/sentinel.test.mjs` automated acceptance and safety tests; `config.example.json` local role configuration; `package.json` run commands; `SENTINEL.code-workspace` editor workspace and test/demo tasks; `.gitignore` generated artifacts exclusions; `REFERENCES.md` license/dependency audit; `VALIDATION.md` measured results; `MANIFEST.json` exact generated file inventory. `artifacts/` contains generated JSON evidence and disposable fixture repositories.
+The archived evaluator uses explicit Stage 1 development-benchmark annotations and fresh trusted fixture observations. Its five effective outcomes are supported, uncertain, supported, rejected, rejected. Historical AI opinions and effective outcomes are scored separately; ambiguous scope is excluded from forced binary scoring. No new inference is performed and five correlated known cases do not establish discovery recall or general accuracy. Held-out cases and language-specific validation remain future work.
 
-GlitchStitch is outside this milestone. Do not use this prototype as an automatic approval authority.
+Only identical scoped claims on the same source identity group automatically. Original allegations and role provenance remain available. Broader causal grouping is deferred. The generic profile inspects extensions and manifest dependencies as data; it does not run scripts or promote repository text into trusted requirements.
+
+## Inference, confidentiality and limits
+
+Live inference is disabled in the example config and was not authorized for Stage 3. Future live use requires separate authorization, explicit enablement, approved exact source identity and safe payload preflight. Defaults cap 12 calls/20 minutes, six judge allegations, 1600 reserved output tokens/call, 48 KB requests, 256 KiB responses and 16 MiB ledger storage. No retries, cloud fallback or model downloads occur automatically. Different configured model names sharing Ollama do not establish independence.
+
+Known credential/canary patterns are blocked before delivery and redacted in persisted data, including nested JSON text. This is not universal secret detection. Unknown/flagged source must not be enabled merely because inference is local. User review of permitted real-project payloads remains necessary.
+
+Generic hostile execution, autonomous patches, applying changes to targets, general prose contradiction detection, signed provenance and Linux validation are not provided. Human approval always remains pending. Some broader plan requirements are explicitly deferred in the implementation report rather than claimed complete.
+
+## Recovery
+
+Baseline repository `..\baseline-repo`, baseline commit `bad4a1b`, and the unchanged original source preserve recovery points. Implementation changes are local to this worktree/branch. Stop using the worktree to return to the original version. Do not reset, clean, stash or merge the original. See `..\IMPLEMENTATION_REPORT.md` and phase logs for actual results and remaining authorization. Fedora validation has not begun.

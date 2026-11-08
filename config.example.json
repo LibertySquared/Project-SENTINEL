@@ -2,6 +2,9 @@
   "endpoint": "http://127.0.0.1:11434",
   "maxRounds": 2,
   "maxBytes": 24000,
+  "inference": {"enabled": false, "approvedSourceDigest": null},
+  "budget": {"maxCalls": 12, "maxMs": 1200000},
+  "profile": {"id": "generic-tracked-text", "requirements": [], "criteria": []},
   "reviewers": [
     {"role":"correctness","model":"qwen2.5-coder:7b","instructions":"Find concrete runtime and boundary defects."},
     {"role":"requirements","model":"qwen3:4b","instructions":"Find missing requirements and validation omissions."}
