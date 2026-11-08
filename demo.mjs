@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import vm from 'node:vm';
-import {git,repairLoop,review,hash,snapshot,inside,approveRequirement,recordTrustedExecution,adjudicate,atomicFinding,createLedger} from './sentinel.mjs';
+import {git,repairLoop,review,hash,snapshot,inside,approveRequirement,recordTrustedExecution,recordVerifiedInspection,adjudicate,atomicFinding,createLedger,prepareNewOutput} from './sentinel.mjs';
 const APPROVED_SOURCE='export function mean(values) {\n  return values.reduce((a,b)=>a+b,0) / (values.length + 1);\n}\n';
 const APPROVED_TESTS="import {test} from 'node:test';\nimport assert from 'node:assert/strict';\nimport {mean} from './math.mjs';\ntest('arithmetic defect',()=>assert.equal(mean([2,4]),3));\ntest('omitted empty guard',()=>assert.throws(()=>mean([]),RangeError));\ntest('single element regression',()=>assert.equal(mean([7]),7));\n";
 const APPROVED_REQUIREMENTS='mean([2,4]) must return 3. Empty input must throw RangeError.\n';
@@ -36,25 +36,33 @@ export function verifyFixture(root) {
     const context=vm.createContext(Object.create(null),{codeGeneration:{strings:false,wasm:false}});
     const observations=JSON.parse(new vm.Script(source.replace(/^export /,'')+'\n'+HARNESS).runInContext(context,{timeout:1000}));
     if(observations.capabilities.some(x=>x!=='undefined'))throw Error('Unexpected execution capability');
-    observations['test.empty.exists']={kind:'presence',value:true};
-    observations['empty.divisor']={kind:'value',value:source===APPROVED_SOURCE?1:0};
-    observations['two.divisor']={kind:'value',value:source===APPROVED_SOURCE?3:2};
+    const inspections={'test.empty.exists':{kind:'presence',value:before.files['math.test.mjs'].split('\n').some(line=>line.includes("test('omitted empty guard'"))}};
+    const sourceFacts={'empty.divisor':{kind:'value',value:source===APPROVED_SOURCE?1:0},'two.divisor':{kind:'value',value:source===APPROVED_SOURCE?3:2}};
     const after=fixtureIdentity(root);if(before.digest!==after.digest)throw Error('Candidate changed during execution');
     const names={'mean.two':'arithmetic defect','mean.empty':'omitted empty guard','mean.one':'single element regression'};
     const cases=Object.entries(names).map(([id,name])=>({id,name,actual:observations[id],expected:EXPECTED[id],passed:JSON.stringify(observations[id])===JSON.stringify(EXPECTED[id]),testIdentity:hash(HARNESS_DIGEST+id)}));
     const passed=cases.every(x=>x.passed);
-    return {passed,exitCode:passed?0:1,executionStatus:'completed',candidateDigest:before.digest,harnessDigest:HARNESS_DIGEST,recipe:'approved-mean-fixture-v2',runtime:{node:process.version,kind:'exact-byte-allowlisted VM; no external capabilities'},observations,cases,tests:cases.map(c=>`${c.passed?'✔':'✖'} ${c.name}: actual=${JSON.stringify(c.actual)} expected=${JSON.stringify(c.expected)}`).join('\n'),review:{arithmeticFixed:!source.includes('values.length + 1'),emptyGuardPresent:source.includes('throw new RangeError')}};
+    return {passed,exitCode:passed?0:1,executionStatus:'completed',candidateDigest:before.digest,harnessDigest:HARNESS_DIGEST,recipe:'approved-mean-fixture-v2',runtime:{node:process.version,kind:'exact-byte-allowlisted VM; no external capabilities'},observations,sourceFacts,inspections,cases,tests:cases.map(c=>`${c.passed?'✔':'✖'} ${c.name}: actual=${JSON.stringify(c.actual)} expected=${JSON.stringify(c.expected)}`).join('\n'),review:{arithmeticFixed:!source.includes('values.length + 1'),emptyGuardPresent:source.includes('throw new RangeError')}};
   } catch(e){return {passed:false,exitCode:null,executionStatus:'unverified_incomplete',error:e.message,tests:'BLOCKED: '+e.message,review:{arithmeticFixed:false,emptyGuardPresent:false}};}
 }
 export function fixtureEvidence(root,finding,sourceDigest=fixtureIdentity(root).digest) {
  const run=verifyFixture(root);
  const approvedDigests=[APPROVED_SOURCE,repaired,guarded].map(source=>hash(JSON.stringify({'math.mjs':source,'math.test.mjs':APPROVED_TESTS,'requirements.md':APPROVED_REQUIREMENTS})));
  if(!approvedDigests.includes(sourceDigest)){run.executionStatus='unverified_incomplete';run.error='Original source identity is not approved';}
- const identity={sourceDigest,candidateDigest:run.candidateDigest??'unverified',harnessDigest:run.harnessDigest,testIdentities:Object.keys(run.observations??{}).filter(id=>id!=='capabilities').map(id=>hash(HARNESS_DIGEST+id))};
+ const identity={sourceDigest,candidateDigest:run.candidateDigest??'unverified',conditions:{}};
  const authorities=Object.entries(EXPECTED).map(([conditionId,expected])=>approveRequirement({id:'fixture:'+conditionId,conditionId,expected,sourceRef:hash(APPROVED_REQUIREMENTS+APPROVED_TESTS)}));
  if(run.executionStatus!=='completed')return {identity,authorities,executions:[{findingId:finding.id,conditionId:finding.claim?.conditionId,invalidReason:run.error}]};
- const executions=Object.entries(run.observations).filter(([id])=>id!=='capabilities').map(([conditionId,actual])=>recordTrustedExecution({...identity,findingId:finding.id,conditionId,actual,testIdentity:hash(HARNESS_DIGEST+conditionId),harnessDigest:HARNESS_DIGEST,isolationVerified:true,recipe:run.recipe,origin:conditionId.endsWith('.divisor')?'source-derived from exact approved formula':'fixed approved harness',executionStatus:'completed'}));
- return {identity,authorities,executions,run};
+ const numeric={variants:[{kind:'value',valueType:'number',encodedNonFinite:true},{kind:'exception',valueType:'string'}]};
+ const executions=Object.entries(run.observations).filter(([id])=>id!=='capabilities').map(([conditionId,actual])=>{
+   const binding={candidateDigest:run.candidateDigest,testIdentity:hash(HARNESS_DIGEST+conditionId),harnessDigest:HARNESS_DIGEST,scope:'behavior',category:'runtime_observation',verificationMethod:'approved-fixture-vm-v1',observationSchema:numeric};identity.conditions[conditionId]=binding;
+   return recordTrustedExecution({sourceDigest,candidateDigest:run.candidateDigest,...binding,findingId:finding.id,conditionId,actual,isolationVerified:true,recipe:run.recipe,executionStatus:'completed'});
+ });
+ const inspectionDigest=hash(verifyFixture.toString()+APPROVED_SOURCE+APPROVED_TESTS+APPROVED_REQUIREMENTS);
+ const inspections=[...Object.entries(run.sourceFacts).map(([id,value])=>[id,value,'source_fact']),...Object.entries(run.inspections).map(([id,value])=>[id,value,'test_inspection'])].map(([conditionId,actual,category])=>{
+   const binding={candidateDigest:run.candidateDigest,inspectionIdentity:hash(inspectionDigest+conditionId),harnessDigest:inspectionDigest,scope:category==='source_fact'?'source fact':'suite coverage',category,verificationMethod:category==='source_fact'?'approved-template-inspection-v1':'approved-test-file-inspection-v1',observationSchema:{variants:[{kind:actual.kind,valueType:typeof actual.value}]}};identity.conditions[conditionId]=binding;
+   return recordVerifiedInspection({sourceDigest,...binding,findingId:finding.id,conditionId,actual,inspectionStatus:'completed',recipe:run.recipe});
+ });
+ return {identity,authorities,executions,inspections,run};
 }
 // Explicit development-benchmark annotations from Stage 1, not production title-based rules.
 const ARCHIVE_LABELS=[
@@ -69,9 +77,8 @@ export function scoreOpinions(cases,opinions) {
  return {definiteCases:definite.length,correct:definite.filter(c=>opinions[c.id]===c.expected).length,incorrect:definite.filter(c=>opinions[c.id]!==c.expected).length,ambiguousCases:cases.length-definite.length,generalAccuracy:'not_established',statisticalClaim:false};
 }
 export function archivedBenchmark(output) {
- const out=path.resolve(output),dataRoot=fileURLToPath(new URL('./artifacts/',import.meta.url));
- for(const name of ['validation','strict-model-review','numbered-model-review','final-repair-validation','milestone-2-stage-1','milestone-2-stage-2'])if(out===path.join(dataRoot,name)||out.startsWith(path.join(dataRoot,name)+path.sep))throw Error('Cannot write inside historical evidence');
- if(fs.existsSync(out))throw Error('Evaluation output must be new');fs.mkdirSync(out);
+ const dataRoot=fileURLToPath(new URL('./artifacts/',import.meta.url));
+ const out=prepareNewOutput(output,['validation','strict-model-review','numbered-model-review','final-repair-validation','milestone-2-stage-1','milestone-2-stage-2'].map(name=>path.join(dataRoot,name)));
  const log=createLedger(out),reportBytes=fs.readFileSync(path.join(dataRoot,'numbered-model-review/report.json'));
  const original=JSON.parse(reportBytes),sourceRoot=path.join(dataRoot,'validation/planted-repo');
  const sourceDigest=fixtureIdentity(sourceRoot).digest,cases=[];

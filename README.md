@@ -1,12 +1,12 @@
-# PROJECT SENTINEL — Stage 3 isolated implementation
+# PROJECT SENTINEL — Stage 3A isolated corrections
 
-This is the unmerged implementation branch `sentinel/milestone-2-stage-3`. The original `D:\Project SENTINEL` source is untouched. The approved plan and historical artifacts remain immutable. This is limited review infrastructure, not an autonomous approval authority.
+This is the unmerged correction branch `sentinel/milestone-2-stage-3a`, based on Stage 3 commit `2526f72`. The original source and Stage 3 implementation remain untouched. The approved plan and historical artifacts remain immutable. This is limited review infrastructure, not an autonomous approval authority.
 
 Requires existing Node.js 22+ and Git. Uses only standard libraries: no installation, paid API, package or model download.
 
 ```powershell
-Set-Location 'D:\Project SENTINEL\artifacts\milestone-2-stage-3\implementation'
-$env:TEMP='D:\Project SENTINEL\artifacts\milestone-2-stage-3\runtime-temp'
+Set-Location 'D:\Project SENTINEL\artifacts\milestone-2-stage-3a\implementation'
+$env:TEMP='D:\Project SENTINEL\artifacts\milestone-2-stage-3a\runtime-temp'
 $env:TMP=$env:TEMP
 node --test test/*.test.mjs
 node demo.mjs ..\my-disposable-demo
@@ -39,7 +39,7 @@ Only identical scoped claims on the same source identity group automatically. Or
 
 ## Inference, confidentiality and limits
 
-Live inference is disabled in the example config and was not authorized for Stage 3. Future live use requires separate authorization, explicit enablement, approved exact source identity and safe payload preflight. Defaults cap 12 calls/20 minutes, six judge allegations, 1600 reserved output tokens/call, 48 KB requests, 256 KiB responses and 16 MiB ledger storage. No retries, cloud fallback or model downloads occur automatically. Different configured model names sharing Ollama do not establish independence.
+Live inference is disabled in the example config and is not authorized for Stage 3A. Future live use requires separate authorization, explicit enablement, source preflight, and a host-issued `authorizePayload` capability covering the exact sanitized serialized request, selected-source identity/files, approval event/actor and intended loopback destination. Source digest approval and pattern screening alone are insufficient. Any request/destination/selection change invalidates the capability; serialized/model-created approval objects are not accepted. The trusted host must obtain real user approval, not automatically issue capabilities for unknown material. This is not a human-identity authentication UI. Defaults remain 12 calls/20 minutes, six judge allegations, 1600 reserved output tokens/call, 48 KB requests, 256 KiB responses and 16 MiB ledger storage. No retries, cloud fallback or model downloads occur automatically. Different configured model names sharing Ollama do not establish independence.
 
 Known credential/canary patterns are blocked before delivery and redacted in persisted data, including nested JSON text. This is not universal secret detection. Unknown/flagged source must not be enabled merely because inference is local. User review of permitted real-project payloads remains necessary.
 
@@ -47,4 +47,14 @@ Generic hostile execution, autonomous patches, applying changes to targets, gene
 
 ## Recovery
 
-Baseline repository `..\baseline-repo`, baseline commit `bad4a1b`, and the unchanged original source preserve recovery points. Implementation changes are local to this worktree/branch. Stop using the worktree to return to the original version. Do not reset, clean, stash or merge the original. See `..\IMPLEMENTATION_REPORT.md` and phase logs for actual results and remaining authorization. Fedora validation has not begun.
+The unchanged Stage 3 worktree and commit `2526f72` are the correction recovery point; the original Stage 3 baseline remains in its repository. Stop using this correction worktree to return to Stage 3. Do not reset, clean, stash or merge either preserved tree. See `..\CORRECTION_REPORT.md` and logs for actual results. Fedora validation has not begun.
+
+## Targeted Stage 3A evidence rules
+
+Receipt authentication is separate from completion, schema validation and binding. Runtime records must explicitly be completed and match the approved condition's observation schema and exact condition-to-test/harness/candidate mapping. Failed/timed-out/cancelled/malformed records cannot confirm or refute a behavioral allegation. Valid independent siblings survive. Old flat test-ID membership is no longer a valid binding policy; trusted adapters must supply explicit `identity.conditions` mappings.
+
+Runtime observations, `source_fact` inspections and `test_inspection` records are separate. Static factories record inspection identities/methods/statuses; runtime factories cannot certify static categories. Model predictions remain untrusted. Static facts can establish scoped static claims or explanations but never set runtime `reproduced` or `actualBehavior.kind: executed`. Raw host receipts remain unverified-until-bound; report views include the completed checks.
+
+Typed reviewer/judge execution states distinguish completed, partial, failed, timeout, cancelled, invalid_response, incomplete, budget_exhausted and not_run. Undispatched tasks retain `taskState: not_run`; a failed/unexecuted judge does not acquire a fabricated original AI response. Legacy reviewer `status: error` remains for compatibility, alongside `executionStatus`. Effective evidence-based truth and human approval remain separate.
+
+Request lifecycle events record admission, dispatch, response-read completion and terminal outcomes using wall timestamps plus monotonic elapsed milliseconds. Incomplete response capture never claims full response completion. Injected deterministic clocks/transports are labeled as tests; there is no measured live-model latency. Archived evaluator output resolves canonical parents, refuses alias ancestors and existing destinations, checks protected canonical roots and verifies new-directory ownership before writing; it introduces no broad cleanup.

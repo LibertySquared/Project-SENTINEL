@@ -25,8 +25,22 @@ export function screen(value) {
 export function createBudget(limits={}) {
   const maxCalls=limits.maxCalls??12, maxMs=limits.maxMs??1200000;
   if(!Number.isInteger(maxCalls)||maxCalls<0||maxCalls>12||!Number.isInteger(maxMs)||maxMs<1||maxMs>1200000) throw Error('Invalid inference budget');
-  const started=Date.now();
-  return {calls:0,reservedOutputTokens:0,started,maxCalls,maxMs,admit(){if(this.calls>=maxCalls||Date.now()-started>=maxMs)throw Error('Inference budget exhausted');this.calls++;this.reservedOutputTokens+=1600;}};
+  const started=Date.now(),startedMono=performance.now();
+  return {calls:0,reservedOutputTokens:0,started,startedMono,maxCalls,maxMs,remainingMs:()=>maxMs-(performance.now()-startedMono),admit(){if(this.calls>=maxCalls||this.remainingMs()<=0)throw Error('Inference budget exhausted');this.calls++;this.reservedOutputTokens+=1600;}};
+}
+export function executionFailure(error) {
+  if(error?.name==='TimeoutError'||error?.code==='ETIMEDOUT')return 'timeout';
+  if(error?.name==='AbortError'||error?.code==='ABORT_ERR')return 'cancelled';
+  if(/budget (exhausted|exceeded)/i.test(error?.message??''))return 'budget_exhausted';
+  if(error?.code==='PAYLOAD_AUTHORIZATION'||/inference disabled/i.test(error?.message??''))return 'not_run';
+  if(/Incomplete inference|capture limit/i.test(error?.message??''))return 'incomplete';
+  if(error instanceof SyntaxError||/Invalid findings|Invalid judge|Decoded response/i.test(error?.message??''))return 'invalid_response';
+  return 'failed';
+}
+function requestTiming(capture=()=>{},clock) {
+  const mono=clock?.mono??(()=>performance.now()),wall=clock?.wall??(()=>new Date().toISOString()),start=mono();
+  const timer={dispatched:false,responded:false,finished:false,mark(stage,data={}){const now=mono();if(!Number.isFinite(now)||now<start)throw Error('Invalid monotonic timing');if(stage==='dispatch')this.dispatched=true;if(stage==='response_completion')this.responded=data.complete!==false;capture('request_timing',{stage,...data,wallTime:wall(),monotonicMs:now,elapsedMs:now-start,clockKind:clock?.kind??'performance.now',dispatched:this.dispatched,responseCompleted:this.responded});},finish(status){if(this.finished)return;this.finished=true;if(['timeout','cancelled','failed'].includes(status))this.mark(status);this.mark('finished',{status});}};
+  return timer;
 }
 export function requestBody(config,role,payload) {
   const string={type:'string'};
@@ -59,10 +73,29 @@ export function approveRequirement(data) {
   if(!data.id||!data.conditionId||!data.sourceRef||!data.expected)throw Error('Incomplete trusted requirement');
   return receipt('requirement',data);
 }
+function destination(url) {
+  const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||u.pathname!=='/api/chat'||u.username||u.password||u.search||u.hash)throw Error('Only approved loopback Ollama destination allowed');return u.href;
+}
+export function authorizePayload({actor,approvalId,request,destination:target,selection}) {
+  const serialized=screen(request);
+  if(!actor||!approvalId||!/^[a-f0-9]{64}$/.test(selection?.sourceDigest??'')||!Array.isArray(selection.files)||selection.files.some(f=>typeof f!=='string'))throw Error('Explicit human payload/selection approval required');
+  if(Buffer.byteLength(serialized)>48000)throw Error('Request byte budget exceeded');
+  return receipt('payload_authorization',{actor,approvalId,selection,payloadDigest:hash(serialized),payload:serialized,destination:destination(target)});
+}
+function requirePayloadAuthorization(authorization,request,target,sourceDigest) {
+  if(!authentic(authorization,'payload_authorization')||authorization.payloadDigest!==hash(screen(request))||authorization.payload!==JSON.stringify(request)||authorization.destination!==destination(target)||authorization.selection.sourceDigest!==sourceDigest){const e=Error('Exact sanitized payload, selection and destination authorization required');e.code='PAYLOAD_AUTHORIZATION';throw e;}
+  return {actor:authorization.actor,approvalId:authorization.approvalId,payloadDigest:authorization.payloadDigest,destination:authorization.destination,selection:authorization.selection};
+}
 export function recordTrustedExecution(data) {
   for(const key of ['sourceDigest','candidateDigest','testIdentity','harnessDigest'])if(!/^[a-f0-9]{64}$/.test(data[key]??''))throw Error('Invalid execution identity');
   if(!data.findingId||!data.conditionId||!data.actual||!data.isolationVerified)throw Error('Incomplete trusted execution');
-  return receipt('execution',data);
+  if(data.category&&data.category!=='runtime_observation')throw Error('Runtime receipts cannot certify static/model evidence');
+  return receipt('execution',{...data,category:'runtime_observation',verificationStatus:'unverified_until_bound'});
+}
+export function recordVerifiedInspection(data) {
+  if(!['source_fact','test_inspection'].includes(data.category))throw Error('Approved static inspection category required');
+  for(const k of ['sourceDigest','candidateDigest','harnessDigest','inspectionIdentity'])if(!/^[a-f0-9]{64}$/.test(data[k]??''))throw Error('Invalid inspection identity');
+  return receipt('inspection',{...data,verificationStatus:'unverified_until_bound'});
 }
 export function recordHumanResolution(data) {
   if(!data.actor||!data.eventId||!data.chosenId||!Array.isArray(data.authorityIds))throw Error('Human resolution record required');
@@ -73,45 +106,78 @@ export function atomicFinding(f) {
 }
 export function canonical(value) {return JSON.stringify(value,(_,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);}
 const same=(a,b)=>canonical(a)===canonical(b);
-function bound(e,f,identity) {return authentic(e,'execution')&&e.findingId===f.id&&e.sourceDigest===identity.sourceDigest&&e.candidateDigest===identity.candidateDigest&&e.harnessDigest===identity.harnessDigest&&identity.testIdentities?.includes(e.testIdentity);}
+function observationMatches(actual,schema) {
+  if(!actual||Array.isArray(actual)||typeof actual!=='object'||!same(Object.keys(actual).sort(),['kind','value']))return false;
+  return Array.isArray(schema?.variants)&&schema.variants.some(v=>actual.kind===v.kind&&(v.valueType==='number'?typeof actual.value==='number'&&Number.isFinite(actual.value)||v.encodedNonFinite===true&&['NaN','Infinity','-Infinity'].includes(actual.value):v.valueType==='string'?typeof actual.value==='string'&&actual.value.length>0:v.valueType==='boolean'?typeof actual.value==='boolean':false));
+}
+export function inspectEvidence(e,f,identity) {
+  const runtime=e?.category==='runtime_observation',staticCategory=['source_fact','test_inspection'].includes(e?.category);
+  const authenticity=authentic(e,runtime?'execution':'inspection');
+  const approved=typeof e?.conditionId==='string'&&Object.hasOwn(identity.conditions??{},e.conditionId)?identity.conditions[e.conditionId]:undefined;
+  const completeness=runtime?e?.executionStatus==='completed':e?.inspectionStatus==='completed';
+  const key=runtime?'testIdentity':'inspectionIdentity';
+  const binding=!!approved&&e.findingId===f.id&&e.sourceDigest===identity.sourceDigest&&e.candidateDigest===identity.candidateDigest&&e.candidateDigest===approved.candidateDigest&&e.harnessDigest===approved.harnessDigest&&typeof approved[key]==='string'&&e[key]===approved[key]&&e.category===approved.category&&typeof approved.verificationMethod==='string'&&e.verificationMethod===approved.verificationMethod&&e.scope===approved.scope;
+  const observation=!!approved&&observationMatches(e?.actual,approved.observationSchema);
+  return {conditionId:e?.conditionId,category:e?.category??'unknown',authenticity:authenticity?'authenticated':'untrusted',executionCompleteness:completeness?'completed':'incomplete',binding:binding?'valid':'invalid',observation:observation?'valid':'invalid',verificationStatus:authenticity&&completeness&&binding&&observation&&(runtime||staticCategory)?'verified':'unverified_incomplete'};
+}
+function bound(e,f,identity) {return inspectEvidence(e,f,identity).verificationStatus==='verified';}
 export function adjudicate(f,judge={},context={}) {
   const claim=f.claim??{},identity=context.identity??{};
   let authorities=(context.authorities??[]).filter(a=>authentic(a,'requirement')&&a.conditionId===claim.conditionId);
   const resolution=context.humanResolution;
   if(authentic(resolution,'resolution')&&authorities.every(a=>resolution.authorityIds.includes(a.id)))authorities=authorities.filter(a=>a.id===resolution.chosenId);
   const expectedConflict=new Set(authorities.map(a=>canonical(a.expected))).size>1;
-  const relevant=(context.executions??[]).filter(e=>e.conditionId===claim.conditionId&&e.findingId===f.id);
-  const valid=relevant.filter(e=>bound(e,f,identity));
+  const records=[context.executions,context.inspections].flatMap(items=>items===undefined?[]:Array.isArray(items)?items:[{invalidCollection:true,supplied:items}]);
+  const malformed=records.some(e=>!e||typeof e!=='object'||typeof e.conditionId!=='string');
+  const relevant=records.filter(e=>e?.conditionId===claim.conditionId);
+  const applicable=e=>claim.operator==='violates_requirement'?e.category==='runtime_observation'&&claim.scope==='behavior':claim.operator==='absent'?e.category==='test_inspection'&&claim.scope==='suite coverage':claim.operator==='equals'?e.category==='source_fact'&&claim.scope==='source fact':true;
+  const valid=relevant.filter(e=>bound(e,f,identity)&&applicable(e));
+  const runtime=valid.filter(e=>e.category==='runtime_observation'&&claim.operator==='violates_requirement');
   const authority=authorities[0];let effective='uncertain',completeness='complete',reason='Insufficient trusted evidence';
   if(claim.scope==='ambiguous'||!claim.conditionId)reason='Ambiguous allegation scope';
   else if(expectedConflict)reason='Conflicting authoritative requirements; pending human resolution';
-  else if(relevant.length&&!valid.length){effective=null;completeness='unverified_incomplete';reason='Execution identity or candidate binding failed';}
   else if(authority&&claim.operator==='expected_is'){effective=same(claim.value,authority.expected)?'supported':'rejected';reason='Authoritative expected behavior establishes the outcome';}
-  else if(authority&&valid.length) {
-    const outcomes=valid.map(e=>claim.operator==='violates_requirement'?!same(e.actual,authority.expected):claim.operator==='absent'?e.actual.kind==='presence'&&!e.actual.value:null);
-    if(outcomes.every(x=>x===true)||outcomes.every(x=>x===false)){effective=outcomes[0]?'supported':'rejected';reason='Trusted requirement and correctly bound execution establish outcome';}
+  else if((relevant.length||malformed)&&!valid.length){effective=null;completeness='unverified_incomplete';reason='Evidence completeness, observation schema or identity binding failed';}
+  else if(valid.length&&(authority||claim.scope==='source fact'||claim.scope==='suite coverage')) {
+    const outcomes=valid.map(e=>claim.operator==='violates_requirement'&&authority?!same(e.actual,authority.expected):claim.operator==='absent'?e.actual.kind==='presence'&&!e.actual.value:claim.operator==='equals'?same(e.actual,claim.value):null);
+    if(outcomes.every(x=>x===true)||outcomes.every(x=>x===false)){effective=outcomes[0]?'supported':'rejected';reason=runtime.length?'Trusted requirement and correctly bound execution establish outcome':'Approved static inspection establishes the scoped fact';}
     else reason='Conflicting trusted evidence or unsupported assertion; reconciliation required';
   }
   const assessComponent=component=>{
     if(!component?.conditionId)return {effective:'uncertain',reason:'Not verified independently'};
-    const e=(context.executions??[]).filter(e=>e.conditionId===component.conditionId&&bound(e,f,identity));
+    const e=records.filter(e=>e?.conditionId===component.conditionId&&bound(e,f,identity));
     if(!e.length)return {effective:'uncertain',reason:'No correctly bound component evidence'};
     const values=e.map(x=>same(x.actual,component.value));
-    return {effective:values.every(Boolean)?'supported':values.every(x=>!x)?'rejected':'uncertain',evidence:e.map(x=>x.testIdentity)};
+    return {effective:values.every(Boolean)?'supported':values.every(x=>!x)?'rejected':'uncertain',evidence:e.map(x=>({identity:x.testIdentity??x.inspectionIdentity,category:x.category,verificationMethod:x.verificationMethod}))};
   };
   const proposedVerdict=judge.verdict??null;
   const disagreement=['supported','rejected'].includes(effective)&&['supported','rejected'].includes(proposedVerdict)&&effective!==proposedVerdict;
-  return {effectiveAdjudication:effective,adjudicationCompleteness:completeness,reason,expectedBehavior:{status:expectedConflict?'conflicted':authority?'authoritative':'unverified',value:authority?.expected??null,authorityIds:authorities.map(a=>a.id)},actualBehavior:{kind:valid.length?'executed':'unverified',records:valid},mechanismAssessment:assessComponent(f.mechanism),correctionAssessment:assessComponent(f.correctionClaim),originalAiVerdict:structuredClone(judge),aiEvidenceDisagreement:disagreement?{findingId:f.id,proposedVerdict,evidenceBasedOutcome:effective,evidence:valid.map(e=>e.testIdentity),authorityIds:authorities.map(a=>a.id)}:null,rationaleConsistency:judge.behaviorAssessment&&judge.behaviorAssessment!==proposedVerdict?'contradictory_structured_fields':'unverified',reproduction:valid.length?'verified_for_declared_case':relevant.length?'invalid_binding':'not_run',reproduced:valid.length>0};
+  const verifiedView=e=>({...e,verificationStatus:'verified',verificationChecks:inspectEvidence(e,f,identity)}),staticFacts=valid.filter(e=>e.category!=='runtime_observation');
+  return {effectiveAdjudication:effective,adjudicationCompleteness:completeness,reason,evidenceChecks:records.map(e=>({...inspectEvidence(e,f,identity),claimRelevant:e?.conditionId===claim.conditionId})),expectedBehavior:{status:expectedConflict?'conflicted':authority?'authoritative':'unverified',value:authority?.expected??null,authorityIds:authorities.map(a=>a.id)},actualBehavior:{kind:runtime.length?'executed':staticFacts.length?'static_verified':claim.operator==='expected_is'?'not_applicable':'unverified',records:runtime.map(verifiedView)},supportingFacts:staticFacts.map(verifiedView),mechanismAssessment:assessComponent(f.mechanism),correctionAssessment:assessComponent(f.correctionClaim),originalAiVerdict:structuredClone(judge),aiEvidenceDisagreement:disagreement?{findingId:f.id,proposedVerdict,evidenceBasedOutcome:effective,evidence:valid.map(e=>e.testIdentity??e.inspectionIdentity),authorityIds:authorities.map(a=>a.id)}:null,rationaleConsistency:judge.behaviorAssessment&&judge.behaviorAssessment!==proposedVerdict?'contradictory_structured_fields':'unverified',reproduction:runtime.length?'verified_for_declared_case':staticFacts.length?'not_applicable_static':claim.operator==='expected_is'?'not_applicable_authority':relevant.length||malformed?'invalid_binding':'not_run',reproduced:runtime.length>0};
 }
 export function groupFindings(findings) {
   const groups=new Map();
-  for(const f of findings){const c=f.claim;const key=c?.conditionId&&c.scope!=='ambiguous'&&f.sourceDigest?hash(JSON.stringify({sourceDigest:f.sourceDigest,conditionId:c.conditionId,operator:c.operator,value:c.value,scope:c.scope})):hash(f.id+':unscoped');if(!groups.has(key))groups.set(key,{groupId:key,relation:'identical_scoped_claim',findingIds:[],originalAllegations:[]});groups.get(key).findingIds.push(f.id);groups.get(key).originalAllegations.push({findingId:f.id,reviewer:f.reviewer??'host',original:f.originalAllegation??f});}
+  for(const f of findings){const c=f.claim;const key=c?.conditionId&&c.scope!=='ambiguous'&&f.sourceDigest?hash(canonical({sourceDigest:f.sourceDigest,conditionId:c.conditionId,operator:c.operator,value:c.value,scope:c.scope})):hash(f.id+':unscoped');if(!groups.has(key))groups.set(key,{groupId:key,relation:'identical_scoped_claim',findingIds:[],originalAllegations:[]});groups.get(key).findingIds.push(f.id);groups.get(key).originalAllegations.push({findingId:f.id,reviewer:f.reviewer??'host',original:f.originalAllegation??f});}
   return [...groups.values()];
 }
 export function describeProfile(snapshot,profile={}) {
   const languagesObserved={};for(const name of Object.keys(snapshot.files)){const ext=path.extname(name).slice(1);languagesObserved[ext]=(languagesObserved[ext]??0)+1;}
   let dependencies=[];try{const pkg=JSON.parse(snapshot.files['package.json']??'{}');dependencies=Object.keys({...pkg.dependencies,...pkg.devDependencies});}catch{}
   return {id:profile.id??'generic-tracked-text',languagesObserved,frameworkSignals:dependencies.filter(x=>['react','next','vue','express','typescript'].includes(x)),architecture:{selectedFiles:Object.keys(snapshot.files),topLevelAreas:[...new Set(Object.keys(snapshot.files).map(x=>x.split('/')[0]))]},requirements:profile.requirements??[],requirementAuthority:'untrusted_until_host_approved',testConventions:Object.keys(snapshot.files).filter(x=>/test|spec/i.test(x)),customCriteria:profile.criteria??[],executionCapabilities:'none; fixed fixture adapter requires host-approved exact bytes',languageSpecificValidation:'not_established'};
+}
+export function prepareNewOutput(output,protectedRoots=[]) {
+  const requested=path.resolve(output),parent=path.dirname(requested);
+  let existing=false;try{fs.lstatSync(requested);existing=true;}catch(e){if(e.code!=='ENOENT')throw e;}if(existing)throw Error('Output must be new; existing paths are not overwritten');
+  for(let current=parent;;current=path.dirname(current)){if(fs.lstatSync(current).isSymbolicLink())throw Error('Unsafe output path alias');if(path.dirname(current)===current)break;}
+  const realParent=fs.realpathSync(parent),out=path.join(realParent,path.basename(requested));
+  const compare=x=>process.platform==='win32'?x.toLowerCase():x;
+  const protectedIds=new Set();
+  for(const root of protectedRoots){const canonicalRoot=fs.realpathSync(root),stat=fs.statSync(canonicalRoot,{bigint:true});protectedIds.add(`${stat.dev}:${stat.ino}`);if(compare(out)===compare(canonicalRoot)||compare(out).startsWith(compare(canonicalRoot)+path.sep))throw Error('Cannot write inside historical evidence');}
+  for(let ancestor=realParent;;ancestor=path.dirname(ancestor)){const stat=fs.statSync(ancestor,{bigint:true});if(protectedIds.has(`${stat.dev}:${stat.ino}`))throw Error('Historical evidence filesystem identity alias');if(path.dirname(ancestor)===ancestor)break;}
+  const before=fs.statSync(realParent);fs.mkdirSync(out);
+  const after=fs.statSync(parent),created=fs.lstatSync(out);
+  if(before.dev!==after.dev||before.ino!==after.ino||created.isSymbolicLink()||compare(fs.realpathSync(parent))!==compare(realParent)||compare(fs.realpathSync(out))!==compare(out))throw Error('Unsafe output ownership/path changed; no evidence written');
+  return out;
 }
 function gitEnv() {
   const env={};for(const key of ['PATH','Path','SystemRoot','SYSTEMROOT','WINDIR','TEMP','TMP'])if(process.env[key]!==undefined)env[key]=process.env[key];
@@ -159,22 +225,26 @@ export function validateConfig(c) {
   return c;
 }
 export async function ollama(config, role, payload, context={}) {
-  if(config.inference?.enabled!==true)throw Error('Live inference disabled; separate authorization required');
-  const endpoint=new URL(config.endpoint);if(endpoint.protocol!=='http:'||endpoint.hostname!=='127.0.0.1'||endpoint.username||endpoint.password||endpoint.pathname!=='/')throw Error('Only loopback Ollama allowed');
-  const request=context.request??requestBody(config,role,payload);screen(request);
-  const transport=context.transport??fetch;
-  const response=await transport(config.endpoint+'/api/chat',{method:'POST',redirect:'error',signal:AbortSignal.timeout(context.timeoutMs??180000),headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
-  let bytes=0,text='',complete=true;
-  if(response.body?.getReader){const reader=response.body.getReader(),decoder=new TextDecoder();try{while(true){const part=await reader.read();if(part.done){text+=decoder.decode();break;}bytes+=part.value.length;if(bytes>262144){complete=false;await reader.cancel();break;}text+=decoder.decode(part.value,{stream:true});}}finally{reader.releaseLock();}}
-  else {text=await response.text();bytes=Buffer.byteLength(text);if(bytes>262144){text=text.slice(0,262144);complete=false;}}
-  context.capture?.('transport_response',{httpStatus:response.status,body:safeData(text),bytes,complete,replayable:complete&&safeData(text)===text,identity:'server-reported model only; no per-call weight attestation'});
-  if(!complete)throw Error('Response capture limit exceeded');
-  if(!response.ok)throw Error('Ollama HTTP '+response.status);
-  screen(text);
-  const body=JSON.parse(text);
-  context.capture?.('completion',{model:body.model??null,done:body.done??null,doneReason:body.done_reason??null,promptTokens:body.prompt_eval_count??null,outputTokens:body.eval_count??null});
-  if(body.done!==true||body.done_reason==='length')throw Error('Incomplete inference response');
-  return JSON.parse(body.message.content);
+  const timer=context.timing??requestTiming(context.capture,context.clock),ownsTimer=!context.timing;
+  try {
+    if(config.inference?.enabled!==true)throw Error('Live inference disabled; separate authorization required');
+    const endpoint=new URL(config.endpoint);if(endpoint.protocol!=='http:'||endpoint.hostname!=='127.0.0.1'||endpoint.username||endpoint.password||endpoint.pathname!=='/'||endpoint.search||endpoint.hash)throw Error('Only loopback Ollama allowed');
+    const target=destination(endpoint.origin+'/api/chat'),request=context.request??requestBody(config,role,payload);screen(request);
+    const approval=requirePayloadAuthorization(context.authorization,request,target,context.sourceDigest??config.inference?.approvedSourceDigest);
+    context.capture?.('payload_authorization',approval);if(context.signal?.aborted)throw new DOMException('Request cancelled before dispatch','AbortError');if(ownsTimer)timer.mark('admission',{status:'admitted'});
+    const transport=context.transport??fetch;timer.mark('dispatch',{kind:context.transport?'fake_transport':'local_transport'});
+    const deadline=AbortSignal.timeout(context.timeoutMs??180000),signal=context.signal?AbortSignal.any([context.signal,deadline]):deadline;
+    const response=await transport(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    let bytes=0,text='',complete=true;
+    if(response.body?.getReader){const reader=response.body.getReader(),decoder=new TextDecoder();try{while(true){const part=await reader.read();if(part.done){text+=decoder.decode();break;}bytes+=part.value.length;if(bytes>262144){complete=false;await reader.cancel();break;}text+=decoder.decode(part.value,{stream:true});}}finally{reader.releaseLock();}}
+    else {text=await response.text();bytes=Buffer.byteLength(text);if(bytes>262144){text=text.slice(0,262144);complete=false;}}
+    if(signal.aborted)throw signal.reason;timer.mark('response_completion',{bytes,complete});
+    context.capture?.('transport_response',{httpStatus:response.status,body:safeData(text),bytes,complete,replayable:complete&&safeData(text)===text,identity:'server-reported model only; no per-call weight attestation'});
+    if(!complete)throw Error('Response capture limit exceeded');if(!response.ok)throw Error('Ollama HTTP '+response.status);screen(text);
+    const body=JSON.parse(text);context.capture?.('completion',{model:body.model??null,done:body.done??null,doneReason:body.done_reason??null,promptTokens:body.prompt_eval_count??null,outputTokens:body.eval_count??null});
+    if(body.done!==true||body.done_reason==='length')throw Error('Incomplete inference response');
+    const parsed=JSON.parse(body.message.content);if(ownsTimer)timer.finish('completed');return parsed;
+  }catch(e){if(context.signal?.aborted)e=new DOMException('Request cancelled','AbortError');if(!(e instanceof Error))e=Error(String(e));e.dispatched=timer.dispatched;if(ownsTimer){if(!timer.dispatched)timer.mark('admission',{status:'rejected'});timer.finish(executionFailure(e));}throw e;}
 }
 export function validateFinding(f,s) {
   if(!f || typeof f.title!=='string'||typeof f.reason!=='string'||typeof f.quote!=='string'||!f.quote || !Number.isInteger(f.line)||f.line<1 || !Object.hasOwn(s.files,f.path)) throw Error('Malformed finding');
@@ -196,13 +266,27 @@ export async function review(root, config, output, infer=ollama, options={}) {
   const manifest={schemaVersion:2,runId,implementationIdentity:sourceIdentity(),configurationIdentity:hash(JSON.stringify(config)),configuration:safeData(config),sourceDigest:s.digest,profile:describeProfile(s,config.profile),exactHistoricalReplay:false,note:'Prospective request records are exact only when capture is complete and unredacted. Model names are configured/reported identity, not weight attestation.'};
   fs.writeFileSync(path.join(out,'manifest.json'),JSON.stringify(manifest,null,2),{flag:'wx'});log('manifest',manifest);
   const invoke=async(role,payload)=>{
-    const request=requestBody(config,role,payload);const serialized=screen(request);
-    if(Buffer.byteLength(serialized)>48000)throw Error('Request byte budget exceeded; review incomplete');
-    if(infer===ollama&&config.inference?.approvedSourceDigest!==s.digest)throw Error('Exact safe payload/source preflight approval required');
-    budget.admit();const requestId=crypto.randomUUID();
-    log('request',{requestId,role:role.role,request,requestIdentity:hash(serialized),adapter:infer===ollama?'ollama':'host-supplied deterministic adapter',sourceDigest:s.digest});
-    try {const raw=await infer(config,role,payload,{request,timeoutMs:Math.max(1,Math.min(180000,budget.maxMs-(Date.now()-budget.started))),capture:(type,data)=>log(type,{requestId,...data})});if(Buffer.byteLength(JSON.stringify(raw))>262144)throw Error('Decoded response too large');log('decoded_response',{requestId,raw});screen(raw);return raw;}
-    catch(e){log('inference_error',{requestId,error:e.message});throw e;}
+    const requestId=crypto.randomUUID(),capture=(type,data)=>log(type,{requestId,...data}),timer=requestTiming(capture,options.clock);
+    try {
+      const request=requestBody(config,role,payload),serialized=screen(request);if(Buffer.byteLength(serialized)>48000)throw Error('Request byte budget exceeded; review incomplete');
+      if(options.signal?.aborted)throw new DOMException('Request cancelled before dispatch','AbortError');
+      let authorization;
+      if(infer===ollama){
+        if(config.inference?.approvedSourceDigest!==s.digest){const e=Error('Exact source/payload approval required');e.code='PAYLOAD_AUTHORIZATION';throw e;}
+        const target=destination(new URL('/api/chat',config.endpoint).href);
+        authorization=options.authorizeRequest?await options.authorizeRequest({request:structuredClone(request),destination:target,selection:{sourceDigest:s.digest,files:Object.keys(s.files)}}):options.payloadAuthorizations?.find(a=>a.payloadDigest===hash(serialized));
+        requirePayloadAuthorization(authorization,request,target,s.digest);
+      }
+      budget.admit();timer.mark('admission',{status:'admitted'});
+      log('request',{requestId,role:role.role,request,requestIdentity:hash(serialized),adapter:infer===ollama?'ollama':'host-supplied deterministic adapter',sourceDigest:s.digest});
+      if(infer!==ollama)timer.mark('dispatch',{kind:'deterministic_adapter'});
+      const raw=await infer(config,role,payload,{request,authorization,sourceDigest:s.digest,timing:timer,signal:options.signal,timeoutMs:Math.max(1,Math.min(180000,budget.remainingMs())),capture});
+      if(options.signal?.aborted)throw new DOMException('Request cancelled','AbortError');
+      if(infer!==ollama)timer.mark('response_completion',{kind:'deterministic_adapter'});
+      if(Buffer.byteLength(JSON.stringify(raw)??'null')>262144)throw Error('Decoded response too large');log('decoded_response',{requestId,raw});screen(raw);
+      if(payload.finding?!raw||!['supported','rejected','uncertain'].includes(raw.verdict)||typeof raw.reason!=='string'||typeof raw.reproduction!=='string':!Array.isArray(raw?.findings)||raw.findings.length>30){const e=Error(payload.finding?'Invalid judge output':'Invalid findings array');e.rawResponse=structuredClone(raw);throw e;}
+      timer.finish('completed');return raw;
+    }catch(e){if(options.signal?.aborted)e=new DOMException('Request cancelled','AbortError');if(!(e instanceof Error))e=Error(String(e));e.dispatched=timer.dispatched;if(!timer.dispatched)timer.mark('admission',{status:'rejected'});timer.finish(executionFailure(e));log('inference_error',{requestId,error:e.message,executionStatus:executionFailure(e),dispatched:timer.dispatched});throw e;}
   };
   const models=[...new Set(config.reviewers.map(r=>r.model))];
   const independence={provider:'Ollama (single local provider)',configuredModels:models,independentReviewers:false,note:models.length===1?'One model, multiple roles; no model independence.':'Different configured models; shared provider, correlated errors possible. Independence not established.'};
@@ -216,27 +300,28 @@ export async function review(root, config, output, infer=ollama, options={}) {
       if(!Array.isArray(raw.findings)||raw.findings.length>30) throw Error('Invalid findings array');
       const valid=[], rejectedEvidence=[];
       for(const f of raw.findings) {try {valid.push(validateFinding(f,s));}catch(e){rejectedEvidence.push({finding:f,error:e.message,evidenceStatus:'lexically_invalid',behavioralAdjudication:null});}}
-      reports.push({role:role.role,model:role.model,status:rejectedEvidence.length?'partial':'completed',findings:valid,rejectedEvidence}); findings.push(...valid.map((f,index)=>({...atomicFinding(f),id:hash(runId+':'+role.role+':'+index+':'+f.id).slice(0,24),legacyId:f.id,sourceDigest:s.digest,reviewer:role.role}))); log('review',reports.at(-1));
-    } catch(e) {reports.push({role:role.role,status:'error',error:e.message});log('review',reports.at(-1));}
+      reports.push({role:role.role,model:role.model,status:rejectedEvidence.length?'partial':'completed',executionStatus:rejectedEvidence.length?'partial':'completed',dispatched:true,taskState:'finished',findings:valid,rejectedEvidence}); findings.push(...valid.map((f,index)=>({...atomicFinding(f),id:hash(runId+':'+role.role+':'+index+':'+f.id).slice(0,24),legacyId:f.id,sourceDigest:s.digest,reviewer:role.role}))); log('review',reports.at(-1));
+    } catch(e) {reports.push({role:role.role,status:'error',executionStatus:executionFailure(e),dispatched:e.dispatched===true,taskState:e.dispatched?'finished':'not_run',error:e.message});log('review',reports.at(-1));}
   }
   const judged=[];
   for(const f of findings) {
-    let verdict,judgeExecution={status:'completed'},evidenceContext={};
+    let verdict,rawJudgeResponse,responseReceived=false,judgeExecution={status:'completed',dispatched:true,taskState:'finished'},evidenceContext={};
     try {
       if(judged.length>=6)throw Error('Judge allegation budget exhausted');
       verdict=await invoke(config.judge,{task:'Challenge the atomic allegation against requirements and source. Return {verdict:"supported"|"rejected"|"uncertain",reason:string,reproduction:string}. You cannot execute code. Missing reproduction is not rejection. Trusted requirements and correctly bound execution govern the effective outcome even when you disagree; mechanisms and remedies are assessed separately.',finding:f,files:s.files});
+      rawJudgeResponse=verdict;responseReceived=true;
       log('judge_response',{model:config.judge.model,findingId:f.id,raw:verdict});
       if(!['supported','rejected','uncertain'].includes(verdict.verdict)||typeof verdict.reason!=='string'||typeof verdict.reproduction!=='string') throw Error('Invalid judge output');
-    } catch(e) {judgeExecution={status:'failed',error:safeData(e.message)};verdict=verdict??{verdict:'uncertain',reason:safeData(e.message)};}
+    } catch(e) {if(Object.hasOwn(e,'rawResponse')){rawJudgeResponse=e.rawResponse;responseReceived=true;}judgeExecution={status:executionFailure(e),dispatched:e.dispatched===true,taskState:e.dispatched?'finished':'not_run',error:safeData(e.message)};verdict=verdict??e.rawResponse??{verdict:'uncertain',reason:safeData(e.message)};}
     try {evidenceContext=options.evidenceProvider?await options.evidenceProvider(f,s):{};}catch(e){evidenceContext={};judgeExecution.evidenceError=safeData(e.message);}
     const decision=adjudicate(f,verdict,evidenceContext);
-    const processedJudge=judgeExecution.status==='failed'?{verdict:'uncertain',reason:judgeExecution.error}:verdict;
-    judged.push({...f,judge:processedJudge,judgeExecution,...decision});
+    const processedJudge=judgeExecution.status!=='completed'?{verdict:'uncertain',reason:judgeExecution.error}:verdict;
+    judged.push({...f,judge:processedJudge,judgeExecution:{...judgeExecution,responseReceived},...decision,originalAiVerdict:responseReceived?structuredClone(rawJudgeResponse??null):null});
     log('judge',judged.at(-1));
   }
   const after=snapshot(root,config.maxBytes);
   const unchanged=s.digest===after.digest&&s.head===after.head&&s.status===after.status;
-  const result={schemaVersion:2,runId,independence,snapshot:{...s,files:undefined},reports,findings:judged,groups:groupFindings(judged),targetUnchanged:unchanged,execution:{reviewers:reports.map(r=>({role:r.role,status:r.status})),judges:judged.map(f=>({findingId:f.id,...f.judgeExecution}))},coverage:{selectedBytes:s.bytes,excluded:s.excluded,scope:s.coverage,unadjudicated:judged.filter(f=>f.judgeExecution.status!=='completed').map(f=>f.id),untrackedIncluded:false},qualityAcceptance:'criteria_incomplete',humanApproval:'pending',usage:{requests:budget.calls,reservedOutputTokens:budget.reservedOutputTokens,wallMs:Date.now()-budget.started},gate:'NEEDS_HUMAN_REVIEW',note:'Evidence-based supported/rejected is distinct from AI opinion, execution completeness and human approval.'};
+  const result={schemaVersion:2,runId,independence,snapshot:{...s,files:undefined},reports,findings:judged,groups:groupFindings(judged),targetUnchanged:unchanged,execution:{reviewers:reports.map(r=>({role:r.role,status:r.executionStatus,dispatched:r.dispatched,taskState:r.taskState})),judges:judged.map(f=>({findingId:f.id,...f.judgeExecution}))},coverage:{selectedBytes:s.bytes,excluded:s.excluded,scope:s.coverage,unadjudicated:judged.filter(f=>f.judgeExecution.status!=='completed').map(f=>f.id),untrackedIncluded:false},qualityAcceptance:'criteria_incomplete',humanApproval:'pending',usage:{requests:budget.calls,reservedOutputTokens:budget.reservedOutputTokens,wallMs:Date.now()-budget.started,monotonicElapsedMs:performance.now()-budget.startedMono},gate:'NEEDS_HUMAN_REVIEW',note:'Evidence-based supported/rejected is distinct from AI opinion, execution completeness and human approval.'};
   log('result',result);fs.writeFileSync(path.join(out,'report.json'),JSON.stringify(safeData(result),null,2),{flag:'wx'});
   return result;
 }

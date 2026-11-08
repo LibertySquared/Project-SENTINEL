@@ -1,10 +1,11 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {hash,approveRequirement,recordTrustedExecution,recordHumanResolution,atomicFinding,adjudicate,groupFindings} from '../sentinel.mjs';
-const identity={sourceDigest:hash('base'),candidateDigest:hash('candidate'),harnessDigest:hash('harness'),testIdentities:['mean.two','mean.empty','empty.divisor'].map(hash)};
+import {hash,approveRequirement,recordTrustedExecution,recordVerifiedInspection,recordHumanResolution,atomicFinding,adjudicate,groupFindings} from '../sentinel.mjs';
+const schema={variants:[{kind:'value',valueType:'number',encodedNonFinite:true},{kind:'exception',valueType:'string'}]};
+const identity={sourceDigest:hash('base'),candidateDigest:hash('candidate'),conditions:Object.fromEntries(['mean.two','mean.empty','empty.divisor'].map(id=>[id,{candidateDigest:hash('candidate'),harnessDigest:hash('harness'),...(id==='empty.divisor'?{inspectionIdentity:hash(id),scope:'source fact',category:'source_fact',verificationMethod:'approved-source-inspection'}:{testIdentity:hash(id),scope:'behavior',category:'runtime_observation',verificationMethod:'approved-test'}),observationSchema:schema}]))};
 const finding={id:'f',sourceDigest:identity.sourceDigest,title:'arithmetic',path:'math.mjs',line:2,quote:'return',reason:'wrong divisor',claim:{scope:'behavior',conditionId:'mean.two',operator:'violates_requirement'}};
 const a=approveRequirement({id:'req1',conditionId:'mean.two',expected:{kind:'value',value:3},sourceRef:'trusted assertion'});
-const exec=(findingId='f',conditionId='mean.two',actual={kind:'value',value:2})=>recordTrustedExecution({...identity,findingId,conditionId,actual,testIdentity:hash(conditionId),harnessDigest:hash('harness'),isolationVerified:true});
+const exec=(findingId='f',conditionId='mean.two',actual={kind:'value',value:2})=>(conditionId==='empty.divisor'?recordVerifiedInspection:recordTrustedExecution)({...identity,...identity.conditions[conditionId],findingId,conditionId,actual,isolationVerified:true,executionStatus:'completed',inspectionStatus:'completed'});
 test('T1/T2 trusted defect supported despite AI rejection and independently rejected explanation',()=>{
  const f={...finding,mechanism:{conditionId:'empty.divisor',value:{kind:'value',value:0}}};const e=exec();const mechanism=exec('f','empty.divisor',{kind:'value',value:1});const ai={verdict:'rejected',reason:'the test passes'};
  const r=adjudicate(f,ai,{identity,authorities:[a],executions:[e,mechanism]});assert.equal(r.effectiveAdjudication,'supported');assert.equal(r.mechanismAssessment.effective,'rejected');assert.deepEqual(r.originalAiVerdict,ai);assert.equal(r.aiEvidenceDisagreement.proposedVerdict,'rejected');assert.equal(r.actualBehavior.kind,'executed');
@@ -24,11 +25,11 @@ test('T2 ambiguity, conflicting trusted requirements and explicit human resoluti
 });
 test('T2/T3 no execution is not refutation; forged, stale and mutated receipts are incomplete',()=>{
  assert.equal(adjudicate(finding,{verdict:'rejected'},{identity,authorities:[a]}).effectiveAdjudication,'uncertain');
- for(const e of [JSON.parse(JSON.stringify(exec())),recordTrustedExecution({...identity,candidateDigest:hash('stale'),findingId:'f',conditionId:'mean.two',actual:{kind:'value',value:2},testIdentity:hash('t'),harnessDigest:hash('h'),isolationVerified:true})]){const r=adjudicate(finding,{}, {identity,authorities:[a],executions:[e]});assert.equal(r.effectiveAdjudication,null);assert.equal(r.adjudicationCompleteness,'unverified_incomplete');}
+ for(const e of [JSON.parse(JSON.stringify(exec())),recordTrustedExecution({...identity,...identity.conditions['mean.two'],executionStatus:'completed',candidateDigest:hash('stale'),findingId:'f',conditionId:'mean.two',actual:{kind:'value',value:2},isolationVerified:true})]){const r=adjudicate(finding,{}, {identity,authorities:[a],executions:[e]});assert.equal(r.effectiveAdjudication,null);assert.equal(r.adjudicationCompleteness,'unverified_incomplete');}
  const e=exec();e.actual.value=99;assert.equal(adjudicate(finding,{}, {identity,authorities:[a],executions:[e]}).adjudicationCompleteness,'unverified_incomplete');
 });
 test('T3 wrong harness/test identities cannot certify evidence; invalid siblings do not demote valid proof',()=>{
- const good=exec(),bad=recordTrustedExecution({...identity,findingId:'f',conditionId:'mean.two',actual:{kind:'value',value:2},testIdentity:hash('wrong test'),harnessDigest:hash('wrong harness'),isolationVerified:true});
+ const good=exec(),bad=recordTrustedExecution({...identity,...identity.conditions['mean.two'],executionStatus:'completed',findingId:'f',conditionId:'mean.two',actual:{kind:'value',value:2},testIdentity:hash('wrong test'),harnessDigest:hash('wrong harness'),isolationVerified:true});
  assert.equal(adjudicate(finding,{}, {identity,authorities:[a],executions:[bad]}).adjudicationCompleteness,'unverified_incomplete');
  assert.equal(adjudicate(finding,{verdict:'rejected'}, {identity,authorities:[a],executions:[bad,good]}).effectiveAdjudication,'supported');
 });
