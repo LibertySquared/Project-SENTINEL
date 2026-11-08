@@ -34,9 +34,10 @@ export function executionFailure(error) {
   if(/budget (exhausted|exceeded)/i.test(error?.message??''))return 'budget_exhausted';
   if(error?.code==='PAYLOAD_AUTHORIZATION'||/inference disabled/i.test(error?.message??''))return 'not_run';
   if(/Incomplete inference|capture limit/i.test(error?.message??''))return 'incomplete';
-  if(error instanceof SyntaxError||/Invalid findings|Invalid judge|Decoded response/i.test(error?.message??''))return 'invalid_response';
+  if(error instanceof SyntaxError||/Invalid findings|Invalid judge|Invalid inference response|Decoded response/i.test(error?.message??''))return 'invalid_response';
   return 'failed';
 }
+function signalFailure(signal) {return signal?.reason?.name==='TimeoutError'?signal.reason:new DOMException('Request cancelled','AbortError');}
 function requestTiming(capture=()=>{},clock) {
   const mono=clock?.mono??(()=>performance.now()),wall=clock?.wall??(()=>new Date().toISOString()),start=mono();
   const timer={dispatched:false,responded:false,finished:false,mark(stage,data={}){const now=mono();if(!Number.isFinite(now)||now<start)throw Error('Invalid monotonic timing');if(stage==='dispatch')this.dispatched=true;if(stage==='response_completion')this.responded=data.complete!==false;capture('request_timing',{stage,...data,wallTime:wall(),monotonicMs:now,elapsedMs:now-start,clockKind:clock?.kind??'performance.now',dispatched:this.dispatched,responseCompleted:this.responded});},finish(status){if(this.finished)return;this.finished=true;if(['timeout','cancelled','failed'].includes(status))this.mark(status);this.mark('finished',{status});}};
@@ -68,7 +69,7 @@ export function verifyLedger(filename) {
 // These are process-local capabilities, not signatures or independent attestation.
 const receipts=new WeakMap();
 function receipt(type,data) {const record=structuredClone({...data,type});receipts.set(record,hash(JSON.stringify(record)));return Object.freeze(record);}
-function authentic(record,type) {return !!record&&record.type===type&&receipts.get(record)===hash(JSON.stringify(record));}
+function authentic(record,type) {return !!record&&record.type===type&&receipts.has(record)&&receipts.get(record)===hash(JSON.stringify(record));}
 export function approveRequirement(data) {
   if(!data.id||!data.conditionId||!data.sourceRef||!data.expected)throw Error('Incomplete trusted requirement');
   return receipt('requirement',data);
@@ -231,7 +232,7 @@ export async function ollama(config, role, payload, context={}) {
     const endpoint=new URL(config.endpoint);if(endpoint.protocol!=='http:'||endpoint.hostname!=='127.0.0.1'||endpoint.username||endpoint.password||endpoint.pathname!=='/'||endpoint.search||endpoint.hash)throw Error('Only loopback Ollama allowed');
     const target=destination(endpoint.origin+'/api/chat'),request=context.request??requestBody(config,role,payload);screen(request);
     const approval=requirePayloadAuthorization(context.authorization,request,target,context.sourceDigest??config.inference?.approvedSourceDigest);
-    context.capture?.('payload_authorization',approval);if(context.signal?.aborted)throw new DOMException('Request cancelled before dispatch','AbortError');if(ownsTimer)timer.mark('admission',{status:'admitted'});
+    context.capture?.('payload_authorization',approval);if(context.signal?.aborted)throw signalFailure(context.signal);if(ownsTimer)timer.mark('admission',{status:'admitted'});
     const transport=context.transport??fetch;timer.mark('dispatch',{kind:context.transport?'fake_transport':'local_transport'});
     const deadline=AbortSignal.timeout(context.timeoutMs??180000),signal=context.signal?AbortSignal.any([context.signal,deadline]):deadline;
     const response=await transport(target,{method:'POST',redirect:'error',signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
@@ -241,10 +242,12 @@ export async function ollama(config, role, payload, context={}) {
     if(signal.aborted)throw signal.reason;timer.mark('response_completion',{bytes,complete});
     context.capture?.('transport_response',{httpStatus:response.status,body:safeData(text),bytes,complete,replayable:complete&&safeData(text)===text,identity:'server-reported model only; no per-call weight attestation'});
     if(!complete)throw Error('Response capture limit exceeded');if(!response.ok)throw Error('Ollama HTTP '+response.status);screen(text);
-    const body=JSON.parse(text);context.capture?.('completion',{model:body.model??null,done:body.done??null,doneReason:body.done_reason??null,promptTokens:body.prompt_eval_count??null,outputTokens:body.eval_count??null});
-    if(body.done!==true||body.done_reason==='length')throw Error('Incomplete inference response');
+    const body=JSON.parse(text);if(!body||typeof body!=='object'||Array.isArray(body))throw Error('Invalid inference response envelope');
+    context.capture?.('completion',{model:body.model??null,done:body.done??null,doneReason:body.done_reason??null,promptTokens:body.prompt_eval_count??null,outputTokens:body.eval_count??null});
+    if(body.done===false||body.done_reason==='length')throw Error('Incomplete inference response');
+    if(body.done!==true||typeof body.message?.content!=='string')throw Error('Invalid inference response message');
     const parsed=JSON.parse(body.message.content);if(ownsTimer)timer.finish('completed');return parsed;
-  }catch(e){if(context.signal?.aborted)e=new DOMException('Request cancelled','AbortError');if(!(e instanceof Error))e=Error(String(e));e.dispatched=timer.dispatched;if(ownsTimer){if(!timer.dispatched)timer.mark('admission',{status:'rejected'});timer.finish(executionFailure(e));}throw e;}
+  }catch(e){if(context.signal?.aborted)e=signalFailure(context.signal);if(!(e instanceof Error))e=Error(String(e));e.dispatched=timer.dispatched;if(ownsTimer){if(!timer.dispatched)timer.mark('admission',{status:'rejected'});timer.finish(executionFailure(e));}throw e;}
 }
 export function validateFinding(f,s) {
   if(!f || typeof f.title!=='string'||typeof f.reason!=='string'||typeof f.quote!=='string'||!f.quote || !Number.isInteger(f.line)||f.line<1 || !Object.hasOwn(s.files,f.path)) throw Error('Malformed finding');
@@ -269,7 +272,7 @@ export async function review(root, config, output, infer=ollama, options={}) {
     const requestId=crypto.randomUUID(),capture=(type,data)=>log(type,{requestId,...data}),timer=requestTiming(capture,options.clock);
     try {
       const request=requestBody(config,role,payload),serialized=screen(request);if(Buffer.byteLength(serialized)>48000)throw Error('Request byte budget exceeded; review incomplete');
-      if(options.signal?.aborted)throw new DOMException('Request cancelled before dispatch','AbortError');
+      if(options.signal?.aborted)throw signalFailure(options.signal);
       let authorization;
       if(infer===ollama){
         if(config.inference?.approvedSourceDigest!==s.digest){const e=Error('Exact source/payload approval required');e.code='PAYLOAD_AUTHORIZATION';throw e;}
@@ -281,12 +284,12 @@ export async function review(root, config, output, infer=ollama, options={}) {
       log('request',{requestId,role:role.role,request,requestIdentity:hash(serialized),adapter:infer===ollama?'ollama':'host-supplied deterministic adapter',sourceDigest:s.digest});
       if(infer!==ollama)timer.mark('dispatch',{kind:'deterministic_adapter'});
       const raw=await infer(config,role,payload,{request,authorization,sourceDigest:s.digest,timing:timer,signal:options.signal,timeoutMs:Math.max(1,Math.min(180000,budget.remainingMs())),capture});
-      if(options.signal?.aborted)throw new DOMException('Request cancelled','AbortError');
+      if(options.signal?.aborted)throw signalFailure(options.signal);
       if(infer!==ollama)timer.mark('response_completion',{kind:'deterministic_adapter'});
       if(Buffer.byteLength(JSON.stringify(raw)??'null')>262144)throw Error('Decoded response too large');log('decoded_response',{requestId,raw});screen(raw);
       if(payload.finding?!raw||!['supported','rejected','uncertain'].includes(raw.verdict)||typeof raw.reason!=='string'||typeof raw.reproduction!=='string':!Array.isArray(raw?.findings)||raw.findings.length>30){const e=Error(payload.finding?'Invalid judge output':'Invalid findings array');e.rawResponse=structuredClone(raw);throw e;}
       timer.finish('completed');return raw;
-    }catch(e){if(options.signal?.aborted)e=new DOMException('Request cancelled','AbortError');if(!(e instanceof Error))e=Error(String(e));e.dispatched=timer.dispatched;if(!timer.dispatched)timer.mark('admission',{status:'rejected'});timer.finish(executionFailure(e));log('inference_error',{requestId,error:e.message,executionStatus:executionFailure(e),dispatched:timer.dispatched});throw e;}
+    }catch(e){if(options.signal?.aborted)e=signalFailure(options.signal);if(!(e instanceof Error))e=Error(String(e));e.dispatched=timer.dispatched;if(!timer.dispatched)timer.mark('admission',{status:'rejected'});timer.finish(executionFailure(e));log('inference_error',{requestId,error:e.message,executionStatus:executionFailure(e),dispatched:timer.dispatched});throw e;}
   };
   const models=[...new Set(config.reviewers.map(r=>r.model))];
   const independence={provider:'Ollama (single local provider)',configuredModels:models,independentReviewers:false,note:models.length===1?'One model, multiple roles; no model independence.':'Different configured models; shared provider, correlated errors possible. Independence not established.'};

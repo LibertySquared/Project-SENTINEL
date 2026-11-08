@@ -68,12 +68,12 @@ test('F7 canonical grouping ignores property order but never merges distinct sam
  const groups=E.groupFindings([f,second,other]);assert.equal(groups.length,2);assert.deepEqual(groups[0].findingIds,['1','2']);
 });
 test('F8 successful, failed and timed-out fake requests have precise monotonic lifecycle records',async()=>{
- for(const status of ['completed','failed','timeout','cancelled','invalid_response','incomplete']){
+ for(const status of ['completed','failed','timeout','cancelled','invalid_response','invalid_envelope','incomplete']){
   let now=10;const events=[],clock={mono:()=>now,wall:()=>new Date(1000+now).toISOString(),kind:'injected_test_clock'};
-  const responseExpected=['completed','invalid_response','incomplete'].includes(status);
-  const transport=async()=>{now+=7;if(!responseExpected){const e=Error('simulated');e.name=status==='timeout'?'TimeoutError':status==='cancelled'?'AbortError':'Error';throw e;}return new Response(JSON.stringify({done:status!=='incomplete',message:{content:status==='invalid_response'?'bad json':'{}'}}));};
+  const responseExpected=['completed','invalid_response','invalid_envelope','incomplete'].includes(status);
+  const transport=async()=>{now+=7;if(!responseExpected){const e=Error('simulated');e.name=status==='timeout'?'TimeoutError':status==='cancelled'?'AbortError':'Error';throw e;}return new Response(JSON.stringify(status==='invalid_envelope'?{done:true}:{done:status!=='incomplete',message:{content:status==='invalid_response'?'bad json':'{}'}}));};
   try{await E.ollama(config,role,payload,{authorization:authorization(),transport,clock,capture:(type,data)=>events.push({type,...data})});}catch(e){if(status==='completed')throw e;}
-  const times=events.filter(e=>e.type==='request_timing');assert.ok(times.some(e=>e.stage==='admission'));assert.ok(times.some(e=>e.stage==='dispatch'));const end=times.find(e=>e.stage==='finished');assert.equal(end.status,status);assert.equal(end.elapsedMs,7);assert.equal(end.clockKind,'injected_test_clock');assert.ok(times.every(e=>typeof e.wallTime==='string'&&Number.isFinite(e.monotonicMs)));assert.equal(times.some(e=>e.stage==='response_completion'),responseExpected);
+  const times=events.filter(e=>e.type==='request_timing');assert.ok(times.some(e=>e.stage==='admission'));assert.ok(times.some(e=>e.stage==='dispatch'));const end=times.find(e=>e.stage==='finished');assert.equal(end.status,status==='invalid_envelope'?'invalid_response':status);assert.equal(end.elapsedMs,7);assert.equal(end.clockKind,'injected_test_clock');assert.ok(times.every(e=>typeof e.wallTime==='string'&&Number.isFinite(e.monotonicMs)));assert.equal(times.some(e=>e.stage==='response_completion'),responseExpected);
  }
 });
 test('F1 authenticity, completeness, binding and assertion outcome are independent',()=>{
@@ -115,4 +115,10 @@ test('F8 capture-limit failure does not claim a complete response',async()=>{
 });
 test('F1 null or unscoped malformed siblings do not crash or erase independent valid evidence',()=>{
  for(const bad of [null,{},'malformed']){assert.equal(assess([bad,execution()]).effectiveAdjudication,'supported');const r=assess([bad]);assert.equal(r.effectiveAdjudication,null);assert.equal(r.adjudicationCompleteness,'unverified_incomplete');}
+ const untrusted={...JSON.parse(JSON.stringify(execution())),toJSON(){throw Error('Untrusted serialization must not run');}};assert.equal(assess([untrusted,execution()]).effectiveAdjudication,'supported');assert.equal(assess([untrusted]).effectiveAdjudication,null);
+});
+test('F4/F8 external deadline signals remain timeouts rather than user cancellations',async()=>{
+ const controller=new AbortController(),reason=Error('external deadline');reason.name='TimeoutError';controller.abort(reason);const events=[];let dispatched=false;
+ await assert.rejects(E.ollama(config,role,payload,{authorization:authorization(),signal:controller.signal,transport:async()=>{dispatched=true;},capture:(type,data)=>events.push({type,...data})}),e=>e.name==='TimeoutError');
+ assert.equal(dispatched,false);const end=events.find(e=>e.stage==='finished');assert.equal(end.status,'timeout');assert.equal(end.dispatched,false);
 });
